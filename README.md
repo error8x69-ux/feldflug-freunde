@@ -19,3 +19,7 @@
 Die Download-Übersicht zeigt den Mehrbedarf für Hausnummern vor dem Start. Auch kleine Zuschläge sind neben gerundeten GB-Angaben sichtbar. Die Karte animiert den Wechsel zwischen 2D und 3D.
 
 [Änderungen zum aktuellen Release](https://github.com/error8x69-ux/feldflug-freunde/releases/tag/freunde)
+
+## Fehler und Feedback
+
+Fehler, Verbesserungsvorschläge und Rückmeldungen kannst du in den [GitHub Issues](https://github.com/error8x69-ux/feldflug-freunde/issues) melden. Bei Fehlern helfen die Feldflug-Version, dein Gerätemodell und eine kurze Beschreibung, wie sich der Fehler nachstellen lässt.
