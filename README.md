@@ -1,4 +1,4 @@
-# Feldflug Freunde
+# Feldflug
 
 **Abseits ankommen.** Feldflug ist eine Android-Navigation für E-Scooter. Die App zeigt dir Routenvarianten mit Angaben zu Fahrzeit, Belag und Straßenanteil.
 
