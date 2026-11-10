@@ -16,10 +16,6 @@
 - Sprachgeführte Navigation mit 2D- und 3D-Karte, mehreren Designs und anpassbarem Positionssymbol.
 - Offline-Gebiete mit Karte, Routingdaten und Suche. Die Standard-Suche enthält Orte und Straßen. Hausnummern kannst du je Gebiet zusätzlich laden und separat löschen.
 
-## Neu in Version 215939120
-
-Die Download-Übersicht zeigt den Mehrbedarf für Hausnummern vor dem Start. Auch kleine Zuschläge sind neben gerundeten GB-Angaben sichtbar. Die Karte animiert den Wechsel zwischen 2D und 3D.
-
 [Änderungen zum aktuellen Release](https://github.com/error8x69-ux/feldflug-freunde/releases/tag/freunde)
 
 ## Fehler und Feedback
