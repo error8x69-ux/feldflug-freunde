@@ -3,6 +3,11 @@ name: National offline data
 on:
   workflow_dispatch:
     inputs:
+      dataset:
+        description: "Build all datasets or only the charging register"
+        type: choice
+        options: [all, laderegister]
+        default: all
       draft_release:
         description: "Save the verified datasets in unpublished test releases"
         type: boolean
@@ -21,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dataset: [karte, routing, osm, suche, postleitzahlen]
+        dataset: ${{ fromJSON(inputs.dataset == 'laderegister' && '["laderegister"]' || '["karte","routing","osm","suche","postleitzahlen","laderegister"]') }}
     env:
       DATASET: ${{ matrix.dataset }}
       PYTHONUTF8: '1'

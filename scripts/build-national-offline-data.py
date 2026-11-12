@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime
 import gzip
 import hashlib
+from html.parser import HTMLParser
 import json
 from pathlib import Path
 import re
@@ -12,6 +13,7 @@ import shutil
 import sqlite3
 from tempfile import TemporaryDirectory
 from time import monotonic
+from urllib.parse import urljoin, urlsplit
 from zipfile import ZIP_STORED, ZipFile
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -27,6 +29,7 @@ MAP_ASSETS = f"{RELEASES}/karte-de-rest-20261101/common.zip"
 MAP_ASSETS_HASH = "ebd773ed724a6d06fa57a94285348ed457ad033a0707348324b8849ae069c635"
 MAP_BASELINE = f"{RELEASES}/karte-de-fein-20261101/manifest.json"
 SEARCH_BASELINE = f"{RELEASES}/suchdaten-de-kompakt-2026-11-10-1/manifest.json"
+REGISTER_PAGE = "https://www.bundesnetzagentur.de/DE/Fachthemen/ElektrizitaetundGas/E-Mobilitaet/DownloadundKontakt.html"
 OSM_LICENSE = ("© OpenStreetMap contributors · ODbL 1.0\n"
                "https://www.openstreetmap.org/copyright\n"
                "https://opendatacommons.org/licenses/odbl/1-0/\n")
@@ -207,20 +210,68 @@ def osm_build(args, work, output):
         stations = output / "bahnhoefe/offline-stations.tsv"
         script("build-offline-stations.py", pbf, stations)
         station_count = len(stations.read_bytes().splitlines())
-        extension = output / "erweiterungen/ladestationen/charging-de.json.gz"
+        extension = output / "erweiterungen/ladestationen/charging-osm-de.json.gz"
         script("build-charging-pack.py", pbf, extension, "--date", date)
         with gzip.open(extension, "rt", encoding="utf-8") as raw:
             charging = json.load(raw)
         if station_count < 5000 or len(charging["stations"]) < 10000:
             raise ValueError("Nationwide station data is incomplete")
         write_json(extension.with_name("manifest.json"), dict(
-            schema=1, id="charging", date=date, file=extension.name, bytes=extension.stat().st_size,
+            schema=1, id="charging-osm", date=date, file=extension.name, bytes=extension.stat().st_size,
             sha256=digest(extension), source=source.get("url", pbf.name),
             license="ODbL-1.0", attribution="© OpenStreetMap contributors"))
         (output / "NOTICE.txt").write_text(
             f"Geofabrik OSM extract · {timestamp.isoformat()}\n{OSM_LICENSE}", encoding="utf-8")
     return dict(source=source.get("url", pbf.name), osm_timestamp=timestamp.isoformat(),
                 railway_stations=station_count, charging_stations=len(charging["stations"]))
+
+
+def register_source():
+    class Links(HTMLParser):
+        files = []
+
+        def handle_starttag(self, tag, attrs):
+            href = dict(attrs).get("href")
+            if tag != "a" or not href:
+                return
+            url = urljoin(REGISTER_PAGE, href)
+            parts = urlsplit(url)
+            if parts.scheme != "https" or parts.netloc != "data.bundesnetzagentur.de":
+                return
+            match = re.search(r"/Ladesaeulenregister_BNetzA_(\d{4}-\d{2}-\d{2})\.csv$", parts.path)
+            if match:
+                self.files.append((datetime.fromisoformat(match[1]).date().isoformat(), url))
+
+    links = Links()
+    with request(REGISTER_PAGE) as response:
+        links.feed(response.read().decode(response.headers.get_content_charset() or "utf-8"))
+    if not links.files:
+        raise ValueError("The Bundesnetzagentur download page has no dated CSV link")
+    return max(links.files)
+
+
+def register_build(args, work, output):
+    date, url = register_source()
+    csv_file = work / "register.csv"
+    download(url, csv_file, 128 * 1024**2)
+    tools = runpy.run_path(str(SCRIPTS / "combine-charging-sources.py"))
+    stations = tools["register"](csv_file)
+    if len(stations) < 50_000:
+        raise ValueError("The nationwide charging register is incomplete")
+    output.mkdir()
+    payload = dict(date=date, license="CC-BY-4.0", attribution="Bundesnetzagentur.de",
+                   licenseUrl="https://creativecommons.org/licenses/by/4.0/", source=url, stations=stations)
+    file = output / "charging-register-de.json.gz"
+    file.write_bytes(gzip.compress(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+                                   mtime=0))
+    with gzip.open(file, "rt", encoding="utf-8") as raw:
+        if json.load(raw) != payload:
+            raise ValueError("Charging register archive does not match the verified data")
+    write_json(output / "manifest.json", dict(
+        schema=1, id="charging-register", date=date, file=file.name, bytes=file.stat().st_size,
+        sha256=digest(file), source=url, license=payload["license"], attribution=payload["attribution"],
+        license_url=payload["licenseUrl"]))
+    return dict(source=url, date=date, charging_stations=len(stations))
 
 
 def verify_search_samples(output, work, packages):
@@ -312,7 +363,7 @@ def search_build(args, work, output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("dataset", choices=("karte", "routing", "osm", "suche", "postleitzahlen"))
+    parser.add_argument("dataset", choices=("karte", "routing", "osm", "suche", "postleitzahlen", "laderegister"))
     parser.add_argument("output", type=Path, help="New output directory")
     parser.add_argument("--pmtiles-tool", default="pmtiles")
     parser.add_argument("--map-extract", action="append", type=Path)
@@ -331,7 +382,7 @@ def main():
     if args.output.exists():
         raise FileExistsError(args.output)
     build = dict(karte=map_build, routing=routing_build, osm=osm_build, suche=search_build,
-                 postleitzahlen=PROBE["postal_package"])[args.dataset]
+                 postleitzahlen=PROBE["postal_package"], laderegister=register_build)[args.dataset]
     started = monotonic()
     with TemporaryDirectory(prefix=f"{args.dataset}-", dir=args.output.parent) as scratch:
         details = build(args, Path(scratch), args.output)
