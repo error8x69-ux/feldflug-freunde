@@ -82,10 +82,23 @@ jobs:
             --draft --prerelease --latest=false --title "Feldflug offline data test ($DATASET)" \
             --notes "Verified test datasets from build commit $GITHUB_SHA. This draft does not update the production catalogue." \
             "$output"/*
-          release_id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            --jq ".[] | select(.tag_name == \"$tag\" and .draft) | .id")
-          test -n "$release_id"
-          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" --jq '.[] | [.digest, .name, .state] | @tsv' > "$RUNNER_TEMP/assets.tsv"
-          while read -r digest name; do
-            grep -Fxq "$(printf 'sha256:%s\t%s\tuploaded' "$digest" "$name")" "$RUNNER_TEMP/assets.tsv"
-          done < "$output/SHA256SUMS"
+          verify_upload() {
+            local release_id digest name
+            release_id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"$tag\" and .draft) | .id") || return 1
+            [[ "$release_id" =~ ^[0-9]+$ ]] || return 1
+            gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" \
+              --jq '.[] | [.digest, .name, .state] | @tsv' > "$RUNNER_TEMP/assets.tsv" || return 1
+            while read -r digest name; do
+              grep -Fxq "$(printf 'sha256:%s\t%s\tuploaded' "$digest" "$name")" "$RUNNER_TEMP/assets.tsv" || return 1
+            done < "$output/SHA256SUMS"
+          }
+          for attempt in 1 2 3 4 5 6; do
+            if verify_upload; then
+              echo "GitHub verified the digests for $tag."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Unable to verify all uploaded asset digests for $tag." >&2
+          exit 1
