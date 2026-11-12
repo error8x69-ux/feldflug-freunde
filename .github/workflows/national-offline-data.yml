@@ -1,6 +1,8 @@
 name: National offline data
 
 on:
+  schedule:
+    - cron: '23 4 * * *'
   workflow_dispatch:
     inputs:
       dataset:
@@ -12,12 +14,64 @@ on:
         description: "Save the verified datasets in unpublished test releases"
         type: boolean
         default: false
+      publish_updates:
+        description: "Activate verified app updates for the current 28-day slot"
+        type: boolean
+        default: false
+      use_verified_drafts:
+        description: "Seed the first app catalog with the verified Germany test drafts"
+        type: boolean
+        default: false
+
+concurrency:
+  group: feldflug-offline-data
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      slot: ${{ steps.window.outputs.slot }}
+      due: ${{ steps.window.outputs.due }}
+      production: ${{ steps.mode.outputs.production }}
+      datasets: ${{ steps.mode.outputs.datasets }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -B scripts/test-offline-update-publication.py
+      - id: window
+        run: python -B scripts/publish-offline-updates.py gate
+      - id: mode
+        env:
+          DATASET: ${{ inputs.dataset || 'all' }}
+          PRODUCTION: ${{ github.event_name == 'schedule' || inputs.publish_updates }}
+          SEED: ${{ inputs.use_verified_drafts || false }}
+          FIRST: ${{ steps.window.outputs.first }}
+        shell: bash
+        run: |
+          echo "production=$PRODUCTION" >> "$GITHUB_OUTPUT"
+          if [[ "$SEED" == true ]]; then
+            test "$PRODUCTION" = true
+            test "$FIRST" = true
+          fi
+          if [[ "$PRODUCTION" == true ]]; then
+            test "$DATASET" = all
+            echo 'datasets=["karte","routing","osm","suche","postleitzahlen"]' >> "$GITHUB_OUTPUT"
+          elif [[ "$DATASET" == all ]]; then
+            echo 'datasets=["karte","routing","osm","suche","postleitzahlen","laderegister"]' >> "$GITHUB_OUTPUT"
+          else
+            echo "datasets=[\"$DATASET\"]" >> "$GITHUB_OUTPUT"
+          fi
   national:
+    needs: gate
+    if: needs.gate.outputs.production != 'true' || needs.gate.outputs.due == 'true'
     name: ${{ matrix.dataset }}
     runs-on: ubuntu-latest
     timeout-minutes: 300
@@ -26,7 +80,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dataset: ${{ fromJSON(inputs.dataset == 'all' && '["karte","routing","osm","suche","postleitzahlen","laderegister"]' || format('["{0}"]', inputs.dataset)) }}
+        dataset: ${{ fromJSON(needs.gate.outputs.datasets) }}
     env:
       DATASET: ${{ matrix.dataset }}
       PYTHONUTF8: '1'
@@ -38,15 +92,15 @@ jobs:
         with:
           python-version: '3.13'
       - uses: actions/setup-java@v4
-        if: matrix.dataset == 'routing'
+        if: matrix.dataset == 'routing' && !inputs.use_verified_drafts
         with:
           distribution: temurin
           java-version: '17'
       - name: Install the OSM reader
-        if: matrix.dataset == 'osm' || matrix.dataset == 'suche'
+        if: (matrix.dataset == 'osm' || matrix.dataset == 'suche') && !inputs.use_verified_drafts
         run: python -m pip install 'osmium==4.3.2'
       - name: Set up the map tool
-        if: matrix.dataset == 'karte'
+        if: matrix.dataset == 'karte' && !inputs.use_verified_drafts
         shell: bash
         run: |
           mkdir "$RUNNER_TEMP/pmtiles-bin"
@@ -58,16 +112,57 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP/pmtiles-bin" pmtiles
           echo "$RUNNER_TEMP/pmtiles-bin" >> "$GITHUB_PATH"
       - name: Build and validate the national dataset
+        if: '!inputs.use_verified_drafts'
         shell: bash
         run: |
           df -h "$RUNNER_TEMP"
           python -B scripts/build-national-offline-data.py "$DATASET" "$RUNNER_TEMP/verified-data"
           df -h "$RUNNER_TEMP"
+      - name: Reuse the verified initial packages
+        if: inputs.use_verified_drafts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          case "$DATASET" in
+            karte) tag=offline-de-test-43157577549-1-karte ;;
+            routing) tag=offline-de-test-43157577549-1-routing ;;
+            osm) tag=offline-de-test-43157577549-1-osm ;;
+            suche) tag=offline-de-test-20261112-suche-lokal ;;
+            postleitzahlen) tag=offline-de-test-43161689053-1-postleitzahlen ;;
+          esac
+          staging="$RUNNER_TEMP/seed"
+          output="$RUNNER_TEMP/verified-data"
+          mkdir "$staging" "$output"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$staging" \
+            --pattern 'part-*.tar' --pattern 'pruefbericht.json' --pattern SHA256SUMS
+          cd "$staging"
+          tr -d '\r' < SHA256SUMS | sha256sum --check -
+          for part in part-*.tar; do
+            tar -xf "$part" -C "$output"
+          done
+          cp pruefbericht.json "$output/"
       - uses: actions/upload-artifact@v4
         with:
           name: verification-${{ matrix.dataset }}
           path: ${{ runner.temp }}/verified-data/pruefbericht.json
           if-no-files-found: error
+          retention-days: 7
+      - name: Publish verified update bytes
+        if: needs.gate.outputs.production == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SLOT: ${{ needs.gate.outputs.slot }}
+        run: |
+          python -B scripts/publish-offline-updates.py stage --slot "$SLOT" --dataset "$DATASET" \
+            --data "$RUNNER_TEMP/verified-data" --output "$RUNNER_TEMP/update-group"
+      - uses: actions/upload-artifact@v4
+        if: needs.gate.outputs.production == 'true'
+        with:
+          name: update-group-${{ matrix.dataset }}
+          path: ${{ runner.temp }}/update-group/*.json
+          if-no-files-found: error
+          overwrite: true
           retention-days: 7
       - name: Store test packages in an unpublished draft
         if: inputs.draft_release
@@ -102,3 +197,26 @@ jobs:
           done
           echo "Unable to verify all uploaded asset digests for $tag." >&2
           exit 1
+  activate:
+    needs: [gate, national]
+    if: needs.gate.outputs.production == 'true' && needs.gate.outputs.due == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: update-group-*
+          path: update-groups
+          merge-multiple: true
+      - name: Activate the complete catalog
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SLOT: ${{ needs.gate.outputs.slot }}
+        run: python -B scripts/publish-offline-updates.py activate --slot "$SLOT" --data update-groups
