@@ -210,20 +210,25 @@ def osm_build(args, work, output):
         stations = output / "bahnhoefe/offline-stations.tsv"
         script("build-offline-stations.py", pbf, stations)
         station_count = len(stations.read_bytes().splitlines())
-        extension = output / "erweiterungen/ladestationen/charging-osm-de.json.gz"
-        script("build-charging-pack.py", pbf, extension, "--date", date)
-        with gzip.open(extension, "rt", encoding="utf-8") as raw:
-            charging = json.load(raw)
-        if station_count < 5000 or len(charging["stations"]) < 10000:
-            raise ValueError("Nationwide station data is incomplete")
-        write_json(extension.with_name("manifest.json"), dict(
-            schema=1, id="charging-osm", date=date, file=extension.name, bytes=extension.stat().st_size,
-            sha256=digest(extension), source=source.get("url", pbf.name),
-            license="ODbL-1.0", attribution="© OpenStreetMap contributors"))
+        if station_count < 5000:
+            raise ValueError("Nationwide railway station data is incomplete")
+        details = dict(source=source.get("url", pbf.name), osm_timestamp=timestamp.isoformat(),
+                       railway_stations=station_count)
+        if not args.without_charging:
+            extension = output / "erweiterungen/ladestationen/charging-osm-de.json.gz"
+            script("build-charging-pack.py", pbf, extension, "--date", date)
+            with gzip.open(extension, "rt", encoding="utf-8") as raw:
+                charging = json.load(raw)
+            if len(charging["stations"]) < 10000:
+                raise ValueError("Nationwide charging station data is incomplete")
+            details["charging_stations"] = len(charging["stations"])
+            write_json(extension.with_name("manifest.json"), dict(
+                schema=1, id="charging-osm", date=date, file=extension.name, bytes=extension.stat().st_size,
+                sha256=digest(extension), source=source.get("url", pbf.name),
+                license="ODbL-1.0", attribution="© OpenStreetMap contributors"))
         (output / "NOTICE.txt").write_text(
             f"Geofabrik OSM extract · {timestamp.isoformat()}\n{OSM_LICENSE}", encoding="utf-8")
-    return dict(source=source.get("url", pbf.name), osm_timestamp=timestamp.isoformat(),
-                railway_stations=station_count, charging_stations=len(charging["stations"]))
+    return details
 
 
 def register_source():
@@ -372,6 +377,7 @@ def main():
     parser.add_argument("--map-baseline", type=Path)
     parser.add_argument("--geofabrik-index", type=Path)
     parser.add_argument("--osm-input", type=Path)
+    parser.add_argument("--without-charging", action="store_true")
     parser.add_argument("--routing-dir", type=Path)
     parser.add_argument("--prepared-search", type=Path)
     parser.add_argument("--search-baseline", type=Path)

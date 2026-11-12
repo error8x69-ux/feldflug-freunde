@@ -113,10 +113,16 @@ jobs:
           echo "$RUNNER_TEMP/pmtiles-bin" >> "$GITHUB_PATH"
       - name: Build and validate the national dataset
         if: '!inputs.use_verified_drafts'
+        env:
+          PRODUCTION: ${{ needs.gate.outputs.production }}
         shell: bash
         run: |
           df -h "$RUNNER_TEMP"
-          python -B scripts/build-national-offline-data.py "$DATASET" "$RUNNER_TEMP/verified-data"
+          arguments=()
+          if [[ "$PRODUCTION" == true && "$DATASET" == osm ]]; then
+            arguments+=(--without-charging)
+          fi
+          python -B scripts/build-national-offline-data.py "$DATASET" "$RUNNER_TEMP/verified-data" "${arguments[@]}"
           df -h "$RUNNER_TEMP"
       - name: Reuse the verified initial packages
         if: inputs.use_verified_drafts
