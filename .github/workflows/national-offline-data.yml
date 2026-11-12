@@ -1,0 +1,86 @@
+name: National offline data
+
+on:
+  workflow_dispatch:
+    inputs:
+      draft_release:
+        description: "Save the verified datasets in unpublished test releases"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  national:
+    name: ${{ matrix.dataset }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        dataset: [karte, routing, osm, suche, postleitzahlen]
+    env:
+      DATASET: ${{ matrix.dataset }}
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-java@v4
+        if: matrix.dataset == 'routing'
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install the OSM reader
+        if: matrix.dataset == 'osm' || matrix.dataset == 'suche'
+        run: python -m pip install 'osmium==4.3.2'
+      - name: Set up the map tool
+        if: matrix.dataset == 'karte'
+        shell: bash
+        run: |
+          mkdir "$RUNNER_TEMP/pmtiles-bin"
+          archive="$RUNNER_TEMP/pmtiles.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 --max-time 120 \
+            'https://github.com/protomaps/go-pmtiles/releases/download/v1.31.2/go-pmtiles_1.31.2_Linux_x86_64.tar.gz' \
+            --output "$archive"
+          printf '%s  %s\n' '3ed7dbf4ec2e6dfe5e25b6f70d1ffc932729f93c86db353bf514dd71010a312f' "$archive" | sha256sum --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP/pmtiles-bin" pmtiles
+          echo "$RUNNER_TEMP/pmtiles-bin" >> "$GITHUB_PATH"
+      - name: Build and validate the national dataset
+        shell: bash
+        run: |
+          df -h "$RUNNER_TEMP"
+          python -B scripts/build-national-offline-data.py "$DATASET" "$RUNNER_TEMP/verified-data"
+          df -h "$RUNNER_TEMP"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verification-${{ matrix.dataset }}
+          path: ${{ runner.temp }}/verified-data/pruefbericht.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Store test packages in an unpublished draft
+        if: inputs.draft_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          output="$RUNNER_TEMP/draft-assets"
+          python -B scripts/pack-national-offline-draft.py "$RUNNER_TEMP/verified-data" "$output"
+          tag="offline-de-test-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$DATASET"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --draft --prerelease --latest=false --title "Feldflug offline data test ($DATASET)" \
+            --notes "Verified test datasets. This draft does not update the production catalogue." \
+            "$output"/*
+          release_id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"$tag\" and .draft) | .id")
+          test -n "$release_id"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" --jq '.[] | [.digest, .name, .state] | @tsv' > "$RUNNER_TEMP/assets.tsv"
+          while read -r digest name; do
+            grep -Fxq "$(printf 'sha256:%s\t%s\tuploaded' "$digest" "$name")" "$RUNNER_TEMP/assets.tsv"
+          done < "$output/SHA256SUMS"
