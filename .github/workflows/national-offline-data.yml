@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       dataset:
-        description: "Build all datasets or only the charging register"
+        description: "Build all datasets or rerun one dataset"
         type: choice
-        options: [all, laderegister]
+        options: [all, karte, routing, osm, suche, postleitzahlen, laderegister]
         default: all
       draft_release:
         description: "Save the verified datasets in unpublished test releases"
@@ -26,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dataset: ${{ fromJSON(inputs.dataset == 'laderegister' && '["laderegister"]' || '["karte","routing","osm","suche","postleitzahlen","laderegister"]') }}
+        dataset: ${{ fromJSON(inputs.dataset == 'all' && '["karte","routing","osm","suche","postleitzahlen","laderegister"]' || format('["{0}"]', inputs.dataset)) }}
     env:
       DATASET: ${{ matrix.dataset }}
       PYTHONUTF8: '1'
@@ -78,9 +78,9 @@ jobs:
           output="$RUNNER_TEMP/draft-assets"
           python -B scripts/pack-national-offline-draft.py "$RUNNER_TEMP/verified-data" "$output"
           tag="offline-de-test-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$DATASET"
-          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
             --draft --prerelease --latest=false --title "Feldflug offline data test ($DATASET)" \
-            --notes "Verified test datasets. This draft does not update the production catalogue." \
+            --notes "Verified test datasets from build commit $GITHUB_SHA. This draft does not update the production catalogue." \
             "$output"/*
           release_id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
             --jq ".[] | select(.tag_name == \"$tag\" and .draft) | .id")
