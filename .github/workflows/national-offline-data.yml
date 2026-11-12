@@ -226,3 +226,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SLOT: ${{ needs.gate.outputs.slot }}
         run: python -B scripts/publish-offline-updates.py activate --slot "$SLOT" --data update-groups
+  update-email:
+    needs: [gate, national, activate]
+    if: ${{ always() && !cancelled() && needs.gate.outputs.production == 'true' && needs.gate.outputs.due == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Email the update result
+        env:
+          OFFLINE_UPDATE_SMTP: ${{ secrets.OFFLINE_UPDATE_SMTP }}
+          UPDATE_RESULT: ${{ needs.national.result == 'success' && needs.activate.result == 'success' && 'success' || 'failure' }}
+        run: python -B scripts/notify-offline-update.py
